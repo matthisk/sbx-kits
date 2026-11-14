@@ -1,0 +1,109 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+displayName: Maven Artifactory
+description: >-
+  Maven settings.xml for the Artifactory java-virtual repository.
+
+capabilities:
+  # The ~/.m2/settings.xml, minus <servers>: the proxy adds the Authorization
+  # header to every request for the Artifactory host, so Maven needs no
+  # password of its own.
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        # Point Maven's JVM at the truststore built by the startup hook below.
+        # Appended to /etc/sandbox-persistent.sh (sourced by BASH_ENV, profile.d
+        # and CLAUDE_ENV_FILE, and shared with other kits, so: append only, and
+        # keep it quiet and fast). Not ~/.mvn/jvm.config: a repo's own
+        # .mvn/jvm.config wins over it. The case guard keeps MAVEN_OPTS from
+        # growing when nested shells re-source the file; the -f guard avoids
+        # pointing the JVM at a missing store.
+        - command: |
+            set -e
+            f=/etc/sandbox-persistent.sh
+            touch "$f"
+            if ! grep -q 'maven-artifactory-kit' "$f"; then
+              cat >> "$f" <<'EOF'
+            # maven-artifactory-kit: JDK truststore that includes the sbx proxy CA
+            case "$MAVEN_OPTS" in
+              *sbx-truststore*) ;;
+              *) if [ -f /home/agent/.m2/sbx-truststore.p12 ]; then
+                   export MAVEN_OPTS="${MAVEN_OPTS:+$MAVEN_OPTS }-Djavax.net.ssl.trustStore=/home/agent/.m2/sbx-truststore.p12 -Djavax.net.ssl.trustStorePassword=changeit -Djavax.net.ssl.trustStoreType=PKCS12"
+                 fi ;;
+            esac
+            EOF
+            fi
+          user: "0"
+          description: Export MAVEN_OPTS with the sbx truststore in /etc/sandbox-persistent.sh
+      startup:
+        # The proxy CA is generated per sandbox, so the store is rebuilt from
+        # the system bundle (which already contains that CA, which is why curl
+        # works) on every boot rather than baked into the image. openssl writes
+        # a certificate-only PKCS12 file that the JDK reads as trusted entries,
+        # so no keytool/JRE is needed here (the JDK comes from the project's
+        # Nix dev shell). Written to a temp file and renamed so a reader never
+        # sees a half-written store.
+        - command: |
+            set -e
+            bundle=/etc/ssl/certs/ca-certificates.crt
+            out=/home/agent/.m2/sbx-truststore.p12
+            [ -r "$bundle" ] || { echo "maven-artifactory kit: $bundle missing, truststore not built" >&2; exit 0; }
+            mkdir -p /home/agent/.m2
+            tmp=$(mktemp /home/agent/.m2/.sbx-truststore.XXXXXX)
+            openssl pkcs12 -export -nokeys -jdktrust anyExtendedKeyUsage \
+              -in "$bundle" -out "$tmp" -passout pass:changeit
+            mv "$tmp" "$out"
+          user: agent
+          background: false
+          description: Build a JDK truststore (system roots + sbx proxy CA) at ~/.m2/sbx-truststore.p12
+      files:
+        - path: /home/agent/.m2/settings.xml
+          overwrite: false
+          description: Maven settings pointing at Artifactory
+          content: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">
+              <proxies>
+                <proxy><id>sbx-https</id><active>true</active><protocol>https</protocol><host>gateway.docker.internal</host><port>3128</port><nonProxyHosts>localhost|127.0.0.1</nonProxyHosts></proxy>
+                <proxy><id>sbx-http</id><active>true</active><protocol>http</protocol><host>gateway.docker.internal</host><port>3128</port><nonProxyHosts>localhost|127.0.0.1</nonProxyHosts></proxy>
+              </proxies>
+              <profiles>
+                <profile>
+                  <id>artifactory</id>
+                  <repositories>
+                    <repository>
+                      <id>central</id>
+                      <name>java-virtual</name>
+                      <url>https://artifactory.tools.devrtb.com:443/artifactory/java-virtual</url>
+                      <snapshots><enabled>false</enabled></snapshots>
+                    </repository>
+                    <repository>
+                      <id>snapshots</id>
+                      <name>java-virtual</name>
+                      <url>https://artifactory.tools.devrtb.com:443/artifactory/java-virtual</url>
+                      <snapshots />
+                    </repository>
+                  </repositories>
+                  <pluginRepositories>
+                    <pluginRepository>
+                      <id>central</id>
+                      <name>java-virtual</name>
+                      <url>https://artifactory.tools.devrtb.com:443/artifactory/java-virtual</url>
+                      <snapshots><enabled>false</enabled></snapshots>
+                    </pluginRepository>
+                    <pluginRepository>
+                      <id>snapshots</id>
+                      <name>java-virtual</name>
+                      <url>https://artifactory.tools.devrtb.com:443/artifactory/java-virtual</url>
+                      <snapshots />
+                    </pluginRepository>
+                  </pluginRepositories>
+                </profile>
+              </profiles>
+              <activeProfiles>
+                <activeProfile>artifactory</activeProfile>
+              </activeProfiles>
+            </settings>

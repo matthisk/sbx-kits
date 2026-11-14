@@ -1,0 +1,62 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+displayName: Gradle Artifactory
+description: >-
+  Gradle init script and gradle.properties for the Artifactory java-virtual
+  repository.
+
+capabilities:
+  # Credential access and network access are separate grants.
+  # services.gradle.org / downloads.gradle.org are for the Gradle wrapper's
+  # distribution download (it may redirect to GitHub release assets).
+  - type: com.docker.sandbox/network-policy@2
+    config:
+      runtime:
+        allow:
+          - services.gradle.org
+          - downloads.gradle.org
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        # The proxy CA is generated per sandbox, so the store is rebuilt from
+        # the system bundle (which already contains that CA, which is why curl
+        # works) on every boot rather than baked into the image. openssl writes
+        # a certificate-only PKCS12 file that the JDK reads as trusted entries,
+        # so no keytool/JRE is needed here. Written to a temp file and renamed
+        # so a reader never sees a half-written store.
+        - command: |
+            set -e
+            bundle=/etc/ssl/certs/ca-certificates.crt
+            out=/home/agent/.gradle/sbx-truststore.p12
+            [ -r "$bundle" ] || { echo "gradle-artifactory kit: $bundle missing, truststore not built" >&2; exit 0; }
+            mkdir -p /home/agent/.gradle
+            tmp=$(mktemp /home/agent/.gradle/.sbx-truststore.XXXXXX)
+            openssl pkcs12 -export -nokeys -jdktrust anyExtendedKeyUsage \
+              -in "$bundle" -out "$tmp" -passout pass:changeit
+            mv "$tmp" "$out"
+          user: agent
+          background: false
+          description: Build a JDK truststore (system roots + sbx proxy CA) at ~/.gradle/sbx-truststore.p12
+      files:
+        # ~/.gradle/gradle.properties beats a project's gradle.properties, and
+        # Gradle applies systemProp.* both to the wrapper (distribution
+        # download) and to the daemon. Gradle ignores HTTPS_PROXY, so without
+        # the proxy settings it would bypass the sbx proxy (and its credential
+        # injection) and get a 401. The proxy host/port is hardcoded.
+        - path: /home/agent/.gradle/gradle.properties
+          overwrite: false
+          description: Gradle proxy and truststore settings for the sbx proxy
+          content: |
+            # Written by the gradle-artifactory sbx kit.
+            systemProp.http.proxyHost=gateway.docker.internal
+            systemProp.http.proxyPort=3128
+            systemProp.http.nonProxyHosts=localhost|127.0.0.1
+            systemProp.https.proxyHost=gateway.docker.internal
+            systemProp.https.proxyPort=3128
+            systemProp.https.nonProxyHosts=localhost|127.0.0.1
+            systemProp.javax.net.ssl.trustStore=/home/agent/.gradle/sbx-truststore.p12
+            systemProp.javax.net.ssl.trustStorePassword=changeit
+            systemProp.javax.net.ssl.trustStoreType=PKCS12
+

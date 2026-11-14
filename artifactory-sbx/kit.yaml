@@ -1,0 +1,31 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+displayName: Maven Artifactory
+description: >-
+  This kit injects an artifactory username and password for npm, yarn, maven, gradle, etc.
+
+capabilities:
+  # Credential access and network access are separate grants.
+  - type: com.docker.sandbox/network-policy@2
+    config:
+      runtime:
+        allow:
+          - artifactory.tools.devrtb.com
+
+  # The secret is base64("<username>:<password>"). v3 ignores `scheme: basic`,
+  # so the Basic header is built from the header + format fields instead.
+  # Set it on the host with:  sbx secret set maven-artifactory
+  - type: com.docker.sandbox/credential@1
+    description: Artifactory Basic auth for Maven
+    optional: true
+    config:
+      service: maven-artifactory
+      phase: [runtime]
+      apiKey:
+        name: MAVEN_ARTIFACTORY_AUTH # holds a sentinel only
+        proxyManaged: true
+        inject:
+          - domain: artifactory.tools.devrtb.com
+            header: Authorization
+            format: "Basic %s"
